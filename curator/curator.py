@@ -442,6 +442,76 @@ def filter_by_space(client, disk_space=2097152.0, prefix='logstash-', suffix='',
         else:
             logger.info('skipping {0}, summed disk usage is {1:.3f} GB and disk limit is {2:.3f} GB.'.format(index_name, disk_usage/2**30, disk_limit/2**30))
 
+## By oldest
+def filter_by_oldest(object_list=[], timestring=None, time_unit='days',
+                     prefix='logstash-', suffix='', snapshot_prefix='curator-',
+                     utc_now=None, **kwargs):
+    """
+    Pass in a list of indices or snapshots. Returns the oldest object matching
+    ``prefix``, ``timestring`` and ``suffix``.
+
+    :arg object_list: A list of indices or snapshots
+    :arg timestring: An strftime string to match the datestamp in an index name.
+    :arg time_unit: One of ``hours``, ``days``, ``weeks``, ``months``.  Default
+        is ``days``
+    :arg prefix: A string that comes before the datestamp in an index name.
+        Can be empty. Wildcards acceptable.  Default is ``logstash-``.
+    :arg suffix: A string that comes after the datestamp of an index name.
+        Can be empty. Wildcards acceptable.  Default is empty, ``''``.
+    :arg snapshot_prefix: Override the default with this value. Defaults to
+        ``curator-``
+    :arg utc_now: Used for testing.  Overrides current time with specified time.
+    :rtype: generator object (list of strings)
+    """
+
+    object_type = kwargs['object_type'] if 'object_type' in kwargs else 'index'
+    if prefix:
+        prefix = '.' + prefix if prefix[0] == '*' else prefix
+    if suffix:
+        suffix = '.' + suffix if suffix[0] == '*' else suffix
+    if snapshot_prefix:
+        snapshot_prefix = '.' + snapshot_prefix if snapshot_prefix[0] == '*' else snapshot_prefix
+    dateregex = get_date_regex(timestring)
+    if object_type == 'index':
+        regex = '^' + prefix + '(' + dateregex + ')' + suffix + '$'
+    elif object_type == 'snapshot':
+        regex = '(' + '^' + snapshot_prefix + '.*' +  ')'
+
+    object_times = {}
+
+    for object_name in object_list:
+        retval = object_name
+        if object_type == 'index':
+            try:
+                index_timestamp = re.search(regex, object_name).group(1)
+            except AttributeError as e:
+                logger.debug('Unable to match {0} with regular expression {1}. Error: {2}'.format(object_name, regex, e))
+                continue
+            try:
+                object_time = get_index_time(index_timestamp, timestring)
+            except ValueError as e:
+                logger.error('Could not find a valid timestamp for {0} with timestring {1}'.format(object_name, timestring))
+                continue
+        elif object_type == 'snapshot':
+            try:
+                retval = re.search(regex, object_name['snapshot']).group(1)
+            except AttributeError as e:
+                logger.debug('Unable to match {0} with regular expression {1}.  Error: {2}'.format(retval, regex, e))
+                continue
+            try:
+                object_time = datetime.utcfromtimestamp(object_name['start_time_in_millis']/1000.0)
+            except AttributeError as e:
+                logger.debug('Unable to compare time from snapshot {0}.  Error: {1}'.format(object_name, e))
+                continue
+        object_times[object_time] = retval
+
+    oldest_time = sorted(object_times.keys())[0]
+
+    # To keep return behavior the same as other filter_by* functions
+    for retval in [ object_times[oldest_time] ]:
+        yield retval
+
+
 # Operations
 ## Single-index operations
 ### Alias
@@ -900,10 +970,11 @@ def close(client, dry_run=False, **kwargs):
 ## curator delete [ARGS]
 def delete(client, dry_run=False, **kwargs):
     """
-    Two use cases for deleting indices:
+    Three use cases for deleting indices:
     
     1. Delete indices ``older_than`` *n* ``time_unit``\s, matching the given ``timestring``, ``prefix``, and ``suffix``.
     2. Delete indices in excess of ``disk_space`` gigabytes if the ``disk_space`` kwarg is present, beginning from the oldest.  Indices must still match ``prefix`` and ``suffix``.  This amount spans all nodes and shards and must be calculated accordingly.  This is not a recommended use-case.
+    3. Delete the oldest index
 
     .. note::
        As this is an iterative function, default values are handled by the
@@ -939,13 +1010,19 @@ def delete(client, dry_run=False, **kwargs):
     :arg exclude_pattern: Exclude indices matching the provided regular
         expression.
     :arg utc_now: Used for testing.  Overrides current time with specified time.
+    :arg oldest: Instead of deleteing by space or time, just delete the oldest index.
     """
     kwargs['prepend'] = "DRY RUN: " if dry_run else ''
     logging.info(kwargs['prepend'] + "Deleting indices...")
     by_space = kwargs['disk_space'] if 'disk_space' in kwargs else False
+    by_oldest = kwargs['by_oldest'] if 'by_oldest' in kwargs else False
+    
     if by_space:
         logger.info(kwargs['prepend'] + 'Deleting by space rather than time.')
         matching_indices = filter_by_space(client, **kwargs)
+    elif by_oldest:
+        index_list = get_object_list(client, **kwargs)
+        matching_indices = filter_by_oldest(object_list=index_list, **kwargs)
     else:
         index_list = get_object_list(client, **kwargs)
         matching_indices = filter_by_timestamp(object_list=index_list, **kwargs)

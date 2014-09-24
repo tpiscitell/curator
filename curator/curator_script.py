@@ -133,6 +133,7 @@ def make_parser():
     delete_group = parser_delete.add_mutually_exclusive_group()
     delete_group.add_argument('--older-than', help='Delete indices older than n TIME_UNITs', type=int)
     delete_group.add_argument('--disk-space', help='Delete indices beyond DISK_SPACE gigabytes.', type=float)
+    delete_group.add_argument('--oldest',     help='Delete the oldest index', dest='by_oldest', action='store_true')
 
     # Optimize
     parser_optimize = subparsers.add_parser('optimize', help='Optimize indices')
@@ -272,8 +273,8 @@ def main():
             sys.exit(1)
 
     if arguments.command == 'delete':
-        if not arguments.older_than and not arguments.disk_space:
-            print('{0} delete: error: expect one of --older-than or --disk-space'.format(sys.argv[0]))
+        if not arguments.older_than and not arguments.disk_space and not arguments.by_oldest:
+            print('{0} delete: error: expect one of --older-than or --disk-space or --oldest'.format(sys.argv[0]))
             sys.exit(1)
 
     if arguments.command == 'show':
